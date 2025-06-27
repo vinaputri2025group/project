@@ -1,0 +1,132 @@
+name: Winku
+
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: winku
+
+    steps:
+    - name: Download Ngrok
+      run: |
+        Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
+
+    - name: Extract Ngrok
+      run: |
+        Expand-Archive ngrok.zip -DestinationPath .
+        Remove-Item ngrok.zip
+
+    - name: Authenticate Ngrok
+      run: |
+        echo "🔑 Mengautentikasi Ngrok..."
+        .\ngrok.exe authtoken 2z6xcuTAFu5VRUYI1WMRpLMxmCP_6iDuNNdimZEiVguU16fJK
+
+    - name: Enable RDP
+      run: |
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+        Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd!" -Force)
+
+    - name: Start Ngrok Tunnel
+      run: |
+        echo "🌐 Menjalankan Ngrok tunnel ke port 3389..."
+        Start-Process -FilePath ".\ngrok.exe" -ArgumentList "tcp", "3389", "--log", "ngrok.log" `
+          -NoNewWindow
+        Start-Sleep -Seconds 15  # Beri waktu untuk Ngrok memulai
+
+    - name: Tampilkan URL Ngrok
+      run: |
+        echo "⏳ Menunggu URL Ngrok..."
+        $success = $false
+        for ($i = 0; $i -lt 90; $i++) {
+          if (Test-Path "ngrok.log") {
+            $log = Get-Content "ngrok.log" -Raw -ErrorAction SilentlyContinue
+            if ($log -match "url=(tcp://[0-9a-zA-Z\.-]+:[0-9]+)") {
+              Write-Host "🔗 URL Tunnel Ngrok: $($matches[1])"
+              $success = $true
+              break
+            }
+            Write-Host "📜 Log Ngrok terbaru: $log"
+          }
+          Start-Sleep -Seconds 2
+        }
+        if (-not $success) {
+          Write-Error "❌ Gagal menemukan URL Ngrok dalam waktu 3 menit."
+          if (Test-Path "ngrok.log") {
+            $ngrokLog = Get-Content "ngrok.log" -Raw -ErrorAction SilentlyContinue
+            Write-Host "⚠️ Isi log Ngrok: $ngrokLog"
+          }
+          exit 1
+        }
+
+    - name: Monitor Ngrok Tunnel
+      run: |
+        echo "🔍 Memantau Ngrok tunnel untuk memastikan tetap hidup..."
+        $lastLogSize = 0
+        $retryCount = 0
+        $maxRetries = 3
+        while ($true) {
+          # Periksa apakah proses Ngrok masih berjalan
+          $ngrokProcess = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
+          if (-not $ngrokProcess) {
+            Write-Host "⚠️ Proses Ngrok terdeteksi mati, mencoba restart (Percobaan $($retryCount + 1)/$maxRetries)..."
+            Start-Process -FilePath ".\ngrok.exe" -ArgumentList "tcp", "3389", "--log", "ngrok-retry-$retryCount.log" `
+              -NoNewWindow
+            Start-Sleep -Seconds 15
+            $retryCount++
+            if ($retryCount -ge $maxRetries) {
+              Write-Error "❌ Gagal menjaga tunnel Ngrok setelah $maxRetries percobaan."
+              if (Test-Path "ngrok.log") {
+                $ngrokLog = Get-Content "ngrok.log" -Raw -ErrorAction SilentlyContinue
+                Write-Host "⚠️ Isi log Ngrok: $ngrokLog"
+              }
+              exit 1
+            }
+            # Periksa URL baru setelah restart
+            $newLog = Get-Content "ngrok-retry-$retryCount.log" -Raw -ErrorAction SilentlyContinue
+            if ($newLog -match "url=(tcp://[0-9a-zA-Z\.-]+:[0-9]+)") {
+              Write-Host "🔗 URL Tunnel Ngrok baru: $($matches[1])"
+            }
+            continue
+          }
+          # Periksa log untuk error atau disconnection
+          if (Test-Path "ngrok.log") {
+            $log = Get-Content "ngrok.log" -Raw -ErrorAction SilentlyContinue
+            $currentLogSize = $log.Length
+            if ($currentLogSize -gt $lastLogSize) {
+              Write-Host "📜 Update log Ngrok: $log"
+              $lastLogSize = $currentLogSize
+            }
+            if ($log -match "ERR_NGROK") {
+              Write-Host "⚠️ Error ditemukan di log Ngrok: $log"
+              Write-Host "⚠️ Mencoba restart Ngrok (Percobaan $($retryCount + 1)/$maxRetries)..."
+              Stop-Process -Name "ngrok" -Force -ErrorAction SilentlyContinue
+              Start-Process -FilePath ".\ngrok.exe" -ArgumentList "tcp", "3389", "--log", "ngrok-retry-$retryCount.log" `
+                -NoNewWindow
+              Start-Sleep -Seconds 15
+              $retryCount++
+              if ($retryCount -ge $maxRetries) {
+                Write-Error "❌ Gagal menjaga tunnel Ngrok setelah $maxRetries percobaan."
+                if (Test-Path "ngrok.log") {
+                  $ngrokLog = Get-Content "ngrok.log" -Raw -ErrorAction SilentlyContinue
+                  Write-Host "⚠️ Isi log Ngrok: $ngrokLog"
+                }
+                exit 1
+              }
+              # Periksa URL baru setelah restart
+              $newLog = Get-Content "ngrok-retry-$retryCount.log" -Raw -ErrorAction SilentlyContinue
+              if ($newLog -match "url=(tcp://[0-9a-zA-Z\.-]+:[0-9]+)") {
+                Write-Host "🔗 URL Tunnel Ngrok baru: $($matches[1])"
+              }
+              continue
+            }
+          }
+          Start-Sleep -Seconds 10
+        }
+
+    - name: Keep Alive 6 Hours
+      if: always()
+      run: |
+        echo "🕒 Menjaga runner tetap hidup selama 6 jam..."
+        Start-Sleep -Seconds 21600
